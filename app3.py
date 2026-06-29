@@ -552,6 +552,15 @@ def rf(fig):
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
 
+import io
+def rf_tab(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    buf.seek(0)
+    st.image(buf, use_container_width=True)
+    plt.close(fig)
+
 # ══════════════════════════════════════════════════════
 # LOAD ARTIFACTS
 # ══════════════════════════════════════════════════════
@@ -928,7 +937,8 @@ if st.session_state["page"] == "predict":
                 st.session_state["history"].insert(0,{
                     "Crop":Crop_Type,"Region":Region,"Season":Season,
                     "Fertilizer":Fertilizer_Type,"Pesticide":Pesticide_Usage,
-                    "Yield (ton/ha)":pred,"Kategori":f"{emo} {lbl}"
+                    "Yield (ton/ha)":pred,"Kategori":f"{emo} {lbl}",
+                    "Sumber":"🎯 Single"
                 })
             except Exception as e:
                 st.error(f"❌ Inference error: {e}")
@@ -1554,8 +1564,18 @@ elif st.session_state["page"] == "history":
         c3.metric("Yield Terendah",  f"{min(yields):.4f}")
         c4.metric("Rata-rata",       f"{np.mean(yields):.4f}")
 
+        # Hitung berapa dari single vs batch
+        n_single = sum(1 for h in hist if h.get("Sumber", "🎯 Single") == "🎯 Single")
+        n_batch  = sum(1 for h in hist if h.get("Sumber", "") == "📦 Batch")
+        c5, c6 = st.columns(2)
+        c5.metric("🎯 Single Test", n_single)
+        c6.metric("📦 Batch", n_batch)
+
         st.markdown(f"<div class='sec-hdr'>Tabel Riwayat</div>", unsafe_allow_html=True)
         hist_df = pd.DataFrame(hist)
+        # pastikan kolom Sumber ada
+        if "Sumber" not in hist_df.columns:
+            hist_df["Sumber"] = "🎯 Single"
         hist_df.insert(0, "No", range(1, len(hist_df)+1))
         st.dataframe(hist_df, use_container_width=True, hide_index=True)
 
@@ -2003,6 +2023,22 @@ elif st.session_state["page"] == "batch":
         progress_bar.empty()
         st.session_state["batch_preds"]=preds; st.session_state["batch_df"]=batch_df
         st.session_state["batch_errors"]=errs_inf
+        # ── Masukkan hasil batch ke riwayat ──
+        if "history" not in st.session_state: st.session_state["history"] = []
+        for i_h, (_, row_h) in enumerate(batch_df.iterrows()):
+            if preds[i_h] is not None:
+                pred_h = preds[i_h]
+                lbl_h, _, emo_h, _ = yield_info(pred_h)
+                st.session_state["history"].insert(0, {
+                    "Crop":       row_h.get("Crop_Type", "—"),
+                    "Region":     row_h.get("Region", "—"),
+                    "Season":     row_h.get("Season", "—"),
+                    "Fertilizer": row_h.get("Fertilizer_Type", "—"),
+                    "Pesticide":  row_h.get("Pesticide_Usage", "—"),
+                    "Yield (ton/ha)": pred_h,
+                    "Kategori":   f"{emo_h} {lbl_h}",
+                    "Sumber":     "📦 Batch",
+                })
         st.success(f"Selesai! {n-len(errs_inf)}/{n} prediksi berhasil."); st.rerun()
 
     if "batch_preds" in st.session_state and st.session_state.get("batch_df") is not None:
@@ -2154,6 +2190,490 @@ elif st.session_state["page"] == "batch":
             axes[1].set_title("Z-score Residual vs Normal Ideal"); axes[1].legend(); axes[1].grid(True,alpha=0.3)
             plt.tight_layout(); rf(fig)
 
+            # ══════════════════════════════════════════════════════
+            # VISUALISASI LENGKAP — seperti Analisis Data & Prediksi Yield
+            # ══════════════════════════════════════════════════════
+            st.markdown(f"<div class='sec-hdr'>📊 Analisis Dataset Batch</div>", unsafe_allow_html=True)
+
+            # ── Tabel hasil + download (selalu muncul di atas visualisasi) ──
+            st.markdown(f"<div class='sec-hdr'>Tabel Hasil Batch (10 Baris Pertama)</div>", unsafe_allow_html=True)
+            show_cols = [c for c in ["Crop_Type","Region","Season","Fertilizer_Type","Pesticide_Usage","Yield"] if c in b_df_valid.columns]
+            show_cols.append("Prediksi_Yield")
+            if has_yield:
+                b_df_valid["Error"]    = (b_df_valid["Yield"] - b_df_valid["Prediksi_Yield"]).round(4)
+                b_df_valid["AbsError"] = b_df_valid["Error"].abs().round(4)
+                show_cols.extend(["Error","AbsError"])
+            st.dataframe(b_df_valid[show_cols].head(10), use_container_width=True, hide_index=True)
+
+            csv_out = b_df_valid.to_csv(index=False).encode("utf-8")
+            dl_col, _ = st.columns([2, 4])
+            with dl_col:
+                st.download_button("⬇️  Download Hasil Lengkap (CSV)", csv_out,
+                                   "batch_hasil_prediksi.csv", "text/csv")
+
+            st.divider()
+
+            # ── TAB visualisasi batch ──────────────────────────────
+            vt1, vt2, vt3, vt4, vt5 = st.tabs([
+                "📈  Distribusi & Target",
+                "🌾  Per Kategori",
+                "🔗  Korelasi",
+                "🌤  Iklim & Vegetasi",
+                "🧪  Tanah & Nutrisi",
+            ])
+
+            # ── TAB 1: Distribusi & Target ──────────────────────────
+            with vt1:
+                bv1c1, bv1c2 = st.columns(2)
+                with bv1c1:
+                    # Distribusi Yield aktual vs prediksi overlay
+                    fig, ax = plt.subplots(figsize=(5.5, 4))
+                    ax.hist(y_true, bins=30, color=CYAN,  alpha=0.65, edgecolor=BG, lw=0.3, label="Aktual")
+                    ax.hist(y_pred, bins=30, color=GOLD,  alpha=0.65, edgecolor=BG, lw=0.3, label="Prediksi")
+                    ax.axvline(np.mean(y_true), color=CYAN, lw=2.2, ls="--", label=f"Mean Aktual={np.mean(y_true):.3f}")
+                    ax.axvline(np.mean(y_pred), color=GOLD, lw=2.2, ls=":",  label=f"Mean Prediksi={np.mean(y_pred):.3f}")
+                    ax.set_xlabel("Yield (ton/ha)"); ax.set_ylabel("Frekuensi")
+                    ax.set_title("Distribusi: Yield Aktual vs Prediksi"); ax.legend(fontsize=7.5)
+                    ax.grid(True, alpha=0.3); rf_tab(fig)
+
+                with bv1c2:
+                    # KDE Yield aktual
+                    from scipy.stats import gaussian_kde as gkde2
+                    fig, ax = plt.subplots(figsize=(5.5, 4))
+                    kde_b = gkde2(y_true)
+                    xr_b  = np.linspace(y_true.min(), y_true.max(), 300)
+                    ax.fill_between(xr_b, kde_b(xr_b), color=CYAN, alpha=0.15)
+                    ax.plot(xr_b, kde_b(xr_b), color=CYAN, lw=2.5)
+                    ax.axvline(np.mean(y_true),   color=GOLD,  lw=2, ls="--", label=f"Mean={np.mean(y_true):.3f}")
+                    ax.axvline(np.median(y_true),  color=GREEN, lw=2, ls=":",  label=f"Median={np.median(y_true):.3f}")
+                    ax.set_xlabel("Yield (ton/ha)"); ax.set_ylabel("Density")
+                    ax.set_title("KDE Yield Aktual (Batch)"); ax.legend()
+                    ax.grid(True, alpha=0.3); rf_tab(fig)
+
+                bv1c3, bv1c4 = st.columns(2)
+                with bv1c3:
+                    # Boxplot Yield aktual per kelas
+                    fig, ax = plt.subplots(figsize=(5.5, 3.8))
+                    bins5b  = [0, 2, 4, 6, 8, 10]
+                    colors5b = [RED, ORANGE, GOLD, GREEN, CYAN]
+                    lbls5b  = ["SR\n(0–2)", "R\n(2–4)", "S\n(4–6)", "T\n(6–8)", "ST\n(8–10)"]
+                    grps_k  = []
+                    for i in range(5):
+                        mask = (y_true >= bins5b[i]) & (y_true < bins5b[i+1])
+                        grps_k.append(y_true[mask] if mask.sum() > 0 else np.array([0]))
+                    bp_k = ax.boxplot(grps_k, labels=lbls5b, patch_artist=True, widths=0.55)
+                    for patch, c_ in zip(bp_k["boxes"], colors5b):
+                        patch.set_facecolor(c_); patch.set_alpha(0.72)
+                    for med in bp_k["medians"]: med.set_color(T1); med.set_lw(2)
+                    ax.set_ylabel("Yield (ton/ha)"); ax.set_title("Boxplot Yield per Kelas")
+                    ax.grid(True, axis="y", alpha=0.3); rf_tab(fig)
+
+                with bv1c4:
+                    # Q-Q plot Yield aktual
+                    fig, ax = plt.subplots(figsize=(5.5, 3.8))
+                    sp_stats.probplot(y_true, dist="norm", plot=ax)
+                    ax.set_title("Q-Q Plot Yield Aktual (Batch)")
+                    ax.get_lines()[0].set(color=CYAN, markersize=4, alpha=0.7)
+                    ax.get_lines()[1].set(color=RED, lw=2)
+                    ax.grid(True, alpha=0.3); rf_tab(fig)
+
+                # Statistik Yield batch
+                st.markdown(f"<div class='sec-hdr'>Statistik Deskriptif Yield — Batch</div>", unsafe_allow_html=True)
+                stats_b = pd.DataFrame({
+                    "Statistik": ["Min","Max","Mean","Median","Std Dev","Skewness","Kurtosis","N Sampel"],
+                    "Yield Aktual": [
+                        round(float(y_true.min()),4), round(float(y_true.max()),4),
+                        round(float(y_true.mean()),4), round(float(np.median(y_true)),4),
+                        round(float(y_true.std()),4),  round(float(sp_stats.skew(y_true)),4),
+                        round(float(sp_stats.kurtosis(y_true)),4), len(y_true)
+                    ],
+                    "Yield Prediksi": [
+                        round(float(y_pred.min()),4), round(float(y_pred.max()),4),
+                        round(float(y_pred.mean()),4), round(float(np.median(y_pred)),4),
+                        round(float(y_pred.std()),4),  round(float(sp_stats.skew(y_pred)),4),
+                        round(float(sp_stats.kurtosis(y_pred)),4), len(y_pred)
+                    ]
+                })
+                st.dataframe(stats_b.set_index("Statistik"), use_container_width=True)
+
+            # ── TAB 2: Per Kategori ─────────────────────────────────
+            with vt2:
+                bv2c1, bv2c2 = st.columns(2)
+                with bv2c1:
+                    if "Crop_Type" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        crops_b = sorted(b_df_valid["Crop_Type"].unique())
+                        pal4    = [CYAN, GOLD, GREEN, PURPLE]
+                        grps_b  = [b_df_valid[b_df_valid["Crop_Type"]==c]["Yield"].values for c in crops_b]
+                        bp_b = ax.boxplot(grps_b, labels=crops_b, patch_artist=True, widths=0.55)
+                        for patch, c_ in zip(bp_b["boxes"], pal4):
+                            patch.set_facecolor(c_); patch.set_alpha(0.72)
+                        for med in bp_b["medians"]: med.set_color(T1); med.set_lw(2)
+                        ax.set_ylabel("Yield (ton/ha)"); ax.set_title("Boxplot Yield per Crop Type")
+                        ax.grid(True, axis="y", alpha=0.3); rf_tab(fig)
+
+                with bv2c2:
+                    if "Crop_Type" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        agg_b = b_df_valid.groupby("Crop_Type")["Yield"].agg(["mean","std"]).sort_values("mean")
+                        bars_ag = ax.barh(agg_b.index, agg_b["mean"], xerr=agg_b["std"],
+                                          color=pal4[:len(agg_b)], edgecolor=BG, lw=0.5,
+                                          capsize=4, error_kw={"color":T2,"lw":1.5}, alpha=0.85)
+                        for bar, v in zip(bars_ag, agg_b["mean"]):
+                            ax.text(bar.get_width()+0.05, bar.get_y()+bar.get_height()/2,
+                                    f"{v:.3f}", va="center", fontsize=8, color=T2)
+                        ax.set_xlabel("Mean Yield (ton/ha)")
+                        ax.set_title("Rata-rata Yield per Crop (±Std)"); ax.grid(True, axis="x", alpha=0.3); rf_tab(fig)
+
+                bv2c3, bv2c4 = st.columns(2)
+                with bv2c3:
+                    if "Season" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 3.8))
+                        seasons_b = sorted(b_df_valid["Season"].unique())
+                        grps_s = [b_df_valid[b_df_valid["Season"]==s]["Yield"].values for s in seasons_b]
+                        bp_s = ax.boxplot(grps_s, labels=seasons_b, patch_artist=True, widths=0.55)
+                        for patch, c_ in zip(bp_s["boxes"], [CYAN, GOLD, GREEN]):
+                            patch.set_facecolor(c_); patch.set_alpha(0.7)
+                        for med in bp_s["medians"]: med.set_color(T1); med.set_lw(2)
+                        ax.set_ylabel("Yield (ton/ha)"); ax.set_title("Distribusi Yield per Season")
+                        ax.grid(True, axis="y", alpha=0.3); rf_tab(fig)
+
+                with bv2c4:
+                    if "Region" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 3.8))
+                        regions_b = sorted(b_df_valid["Region"].unique())
+                        data_rb   = [b_df_valid[b_df_valid["Region"]==r]["Yield"].values for r in regions_b]
+                        vp_b = ax.violinplot(data_rb, positions=range(len(regions_b)), showmedians=True)
+                        for i, (body, c_) in enumerate(zip(vp_b["bodies"], [CYAN, GOLD, GREEN, PURPLE])):
+                            body.set_facecolor(c_); body.set_alpha(0.65)
+                        vp_b["cmedians"].set_color(T1); vp_b["cmedians"].set_lw(2)
+                        vp_b["cbars"].set_color(T3); vp_b["cmins"].set_color(T3); vp_b["cmaxes"].set_color(T3)
+                        ax.set_xticks(range(len(regions_b))); ax.set_xticklabels(regions_b)
+                        ax.set_ylabel("Yield (ton/ha)"); ax.set_title("Distribusi Yield per Region (Violin)")
+                        ax.grid(True, axis="y", alpha=0.3); rf_tab(fig)
+
+                # Heatmap Crop x Season
+                if "Crop_Type" in b_df_valid.columns and "Season" in b_df_valid.columns:
+                    st.markdown(f"<div class='sec-hdr'>Heatmap Mean Yield: Crop × Season</div>", unsafe_allow_html=True)
+                    pivot_b = b_df_valid.groupby(["Crop_Type","Season"])["Yield"].mean().unstack()
+                    if not pivot_b.empty and pivot_b.shape[1] > 0:
+                        fig, ax = plt.subplots(figsize=(8, 3.5))
+                        sns.heatmap(pivot_b, ax=ax, cmap="YlOrBr",
+                                    annot=True, fmt=".2f", linewidths=0.8, linecolor=BG,
+                                    annot_kws={"size":11,"fontweight":"bold","color":"#0a1a06"},
+                                    cbar_kws={"shrink":0.7})
+                        ax.set_title("Mean Yield Aktual: Crop Type × Season (Batch Data)", pad=8)
+                        for spine in ax.spines.values(): spine.set_visible(False)
+                        rf_tab(fig)
+
+                # Pie distribusi Crop Type
+                if "Crop_Type" in b_df_valid.columns:
+                    st.markdown(f"<div class='sec-hdr'>Sebaran Crop Type & Fertilizer dalam Batch</div>", unsafe_allow_html=True)
+                    bv2p1, bv2p2, bv2p3 = st.columns(3)
+                    with bv2p1:
+                        fig, ax = plt.subplots(figsize=(4.5, 4))
+                        cnt_crop = b_df_valid["Crop_Type"].value_counts()
+                        wedges, _, autotexts = ax.pie(cnt_crop.values, labels=cnt_crop.index,
+                            autopct="%1.0f%%", startangle=90, colors=pal4[:len(cnt_crop)],
+                            wedgeprops=dict(linewidth=2, edgecolor=BG), pctdistance=0.75)
+                        for at in autotexts: at.set_color(BG); at.set_fontsize(9); at.set_fontweight("bold")
+                        ax.set_title("Distribusi Crop Type"); rf_tab(fig)
+                    with bv2p2:
+                        if "Fertilizer_Type" in b_df_valid.columns:
+                            fig, ax = plt.subplots(figsize=(4.5, 4))
+                            cnt_fert = b_df_valid["Fertilizer_Type"].value_counts()
+                            wedges2, _, autotexts2 = ax.pie(cnt_fert.values, labels=cnt_fert.index,
+                                autopct="%1.0f%%", startangle=90, colors=[CYAN, GOLD, GREEN][:len(cnt_fert)],
+                                wedgeprops=dict(linewidth=2, edgecolor=BG), pctdistance=0.75)
+                            for at in autotexts2: at.set_color(BG); at.set_fontsize(9); at.set_fontweight("bold")
+                            ax.set_title("Distribusi Fertilizer Type"); rf_tab(fig)
+                    with bv2p3:
+                        if "Pesticide_Usage" in b_df_valid.columns:
+                            fig, ax = plt.subplots(figsize=(4.5, 4))
+                            cnt_pest = b_df_valid["Pesticide_Usage"].value_counts()
+                            wedges3, _, autotexts3 = ax.pie(cnt_pest.values, labels=cnt_pest.index,
+                                autopct="%1.0f%%", startangle=90, colors=[RED, ORANGE, GOLD][:len(cnt_pest)],
+                                wedgeprops=dict(linewidth=2, edgecolor=BG), pctdistance=0.75)
+                            for at in autotexts3: at.set_color(BG); at.set_fontsize(9); at.set_fontweight("bold")
+                            ax.set_title("Distribusi Pesticide Usage"); rf_tab(fig)
+
+            # ── TAB 3: Korelasi ─────────────────────────────────────
+            with vt3:
+                num_batch = b_df_valid.select_dtypes(include=[np.number])
+                if "Yield" in num_batch.columns and len(num_batch.columns) > 3:
+                    corr_batch = num_batch.corr()
+                    tc_b = corr_batch["Yield"].drop("Yield").sort_values(key=abs, ascending=False).head(15)
+
+                    bv3c1, bv3c2 = st.columns(2)
+                    with bv3c1:
+                        fig, ax = plt.subplots(figsize=(5.5, 6))
+                        clrs_b = [GREEN if v > 0 else RED for v in tc_b[::-1]]
+                        ax.barh(tc_b.index[::-1], tc_b.values[::-1], color=clrs_b, edgecolor=BG, lw=0.3)
+                        ax.axvline(0, color=BORDER2, lw=1)
+                        ax.set_xlabel("Pearson Correlation")
+                        ax.set_title("Top 15 Korelasi Fitur dengan Yield (Batch)")
+                        ax.grid(True, axis="x", alpha=0.3); rf_tab(fig)
+
+                    with bv3c2:
+                        top10_b = tc_b.abs().head(10).index.tolist() + ["Yield"]
+                        mini_b  = corr_batch.loc[top10_b, top10_b]
+                        fig, ax = plt.subplots(figsize=(5.5, 6))
+                        sns.heatmap(mini_b, ax=ax, cmap="RdBu_r", center=0, vmin=-1, vmax=1,
+                                    annot=True, fmt=".2f", linewidths=0.8, linecolor=BG,
+                                    annot_kws={"size":8,"fontweight":"bold"},
+                                    cbar_kws={"shrink":0.8})
+                        ax.set_title("Heatmap Korelasi — Top 10 Fitur + Yield")
+                        for spine in ax.spines.values(): spine.set_visible(False)
+                        rf_tab(fig)
+
+                    # Scatter plots top 4 fitur vs Yield
+                    st.markdown(f"<div class='sec-hdr'>Scatter Plot — Top 4 Fitur vs Yield</div>", unsafe_allow_html=True)
+                    top4 = tc_b.abs().head(4).index.tolist()
+                    bv3s1, bv3s2, bv3s3, bv3s4 = st.columns(4)
+                    for col_sc, ax_col in zip(top4, [bv3s1, bv3s2, bv3s3, bv3s4]):
+                        if col_sc in b_df_valid.columns:
+                            with ax_col:
+                                fig, ax = plt.subplots(figsize=(3.8, 3.5))
+                                ax.scatter(b_df_valid[col_sc], b_df_valid["Yield"],
+                                           alpha=0.6, s=20, color=CYAN, edgecolors="none")
+                                # trendline
+                                z = np.polyfit(b_df_valid[col_sc].dropna(),
+                                               b_df_valid.loc[b_df_valid[col_sc].notna(), "Yield"], 1)
+                                p = np.poly1d(z)
+                                xsc = np.linspace(b_df_valid[col_sc].min(), b_df_valid[col_sc].max(), 100)
+                                ax.plot(xsc, p(xsc), color=RED, lw=1.8, ls="--", alpha=0.8)
+                                r_val = corr_batch.loc[col_sc, "Yield"]
+                                ax.set_title(f"{col_sc}\nr={r_val:.3f}", fontsize=8.5)
+                                ax.set_xlabel(col_sc, fontsize=7.5); ax.set_ylabel("Yield", fontsize=7.5)
+                                ax.grid(True, alpha=0.3); rf_tab(fig)
+
+            # ── TAB 4: Iklim & Vegetasi ─────────────────────────────
+            with vt4:
+                bv4c1, bv4c2 = st.columns(2)
+                # Bar chart kondisi iklim rata-rata (ternormalisasi) — mirip single test
+                with bv4c1:
+                    clim_cols = [c for c in ["Temperature","Humidity","Rainfall","NDVI","GDD","Solar_Radiation","Wind_Speed"] if c in b_df_valid.columns]
+                    if clim_cols:
+                        clim_means = [b_df_valid[c].mean() for c in clim_cols]
+                        clim_maxes = {"Temperature":45,"Humidity":100,"Rainfall":350,
+                                      "NDVI":1,"GDD":3500,"Solar_Radiation":3000,"Wind_Speed":40}
+                        clim_norm  = [min(v/clim_maxes.get(c,1),1) for v,c in zip(clim_means, clim_cols)]
+                        clim_labels_short = {"Temperature":"Suhu","Humidity":"Kelembapan",
+                                             "Rainfall":"Curah Hujan","NDVI":"NDVI",
+                                             "GDD":"GDD","Solar_Radiation":"Solar Rad","Wind_Speed":"Angin"}
+                        bar_colors_clim = [RED if v>0.85 else (GOLD if v>0.6 else GREEN) for v in clim_norm]
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        bars_cl = ax.barh([clim_labels_short.get(c,c) for c in clim_cols],
+                                           clim_norm, color=bar_colors_clim, edgecolor=BG, lw=0.5, height=0.55)
+                        for bar, mean_v, c_ in zip(bars_cl, clim_means, clim_cols):
+                            unit = {"Temperature":"°C","Humidity":"%","Rainfall":"mm","Wind_Speed":"km/h"}.get(c_,"")
+                            ax.text(min(bar.get_width()+0.02,1.02), bar.get_y()+bar.get_height()/2,
+                                    f"{mean_v:.1f}{unit}", va="center", fontsize=8, fontweight="bold", color=T1)
+                        ax.set_xlim(0, 1.3); ax.axvline(1.0, color=BORDER2, ls="--", lw=1, alpha=0.5)
+                        ax.set_title("Rata-rata Kondisi Iklim (Ternormalisasi) — Batch")
+                        ax.grid(axis="x", ls="--", alpha=0.3); rf_tab(fig)
+
+                with bv4c2:
+                    # Indeks vegetasi scatter NDVI vs EVI
+                    veg_cols = [c for c in ["NDVI","EVI","LAI","Chlorophyll"] if c in b_df_valid.columns]
+                    if len(veg_cols) >= 2:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        sc_veg = ax.scatter(b_df_valid[veg_cols[0]], b_df_valid[veg_cols[1]],
+                                            c=b_df_valid["Yield"], cmap="YlGn",
+                                            alpha=0.75, s=35, edgecolors="none", vmin=0, vmax=10)
+                        plt.colorbar(sc_veg, ax=ax, label="Yield (ton/ha)").ax.yaxis.label.set_color(T2)
+                        ax.set_xlabel(veg_cols[0]); ax.set_ylabel(veg_cols[1])
+                        ax.set_title(f"{veg_cols[0]} vs {veg_cols[1]} — warna = Yield")
+                        ax.grid(True, alpha=0.3); rf_tab(fig)
+
+                bv4c3, bv4c4 = st.columns(2)
+                with bv4c3:
+                    # Scatter Temperature vs Rainfall berwarna Yield
+                    if "Temperature" in b_df_valid.columns and "Rainfall" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        sc_tr = ax.scatter(b_df_valid["Temperature"], b_df_valid["Rainfall"],
+                                           c=b_df_valid["Yield"], cmap="RdYlGn",
+                                           alpha=0.8, s=40, edgecolors="none", vmin=0, vmax=10)
+                        plt.colorbar(sc_tr, ax=ax, label="Yield").ax.yaxis.label.set_color(T2)
+                        ax.set_xlabel("Temperature (°C)"); ax.set_ylabel("Rainfall (mm)")
+                        ax.set_title("Temperature vs Rainfall — warna = Yield")
+                        ax.grid(True, alpha=0.3); rf_tab(fig)
+
+                with bv4c4:
+                    # Bar GDD rata-rata per Crop Type
+                    if "GDD" in b_df_valid.columns and "Crop_Type" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        gdd_agg = b_df_valid.groupby("Crop_Type")["GDD"].mean().sort_values()
+                        bars_gdd = ax.bar(gdd_agg.index, gdd_agg.values,
+                                          color=[CYAN,GOLD,GREEN,PURPLE][:len(gdd_agg)],
+                                          edgecolor=BG, lw=0.5, alpha=0.85)
+                        for bar, v in zip(bars_gdd, gdd_agg.values):
+                            ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+10,
+                                    f"{v:.0f}", ha="center", fontsize=8.5, fontweight="bold", color=T2)
+                        ax.set_ylabel("GDD (°C·day)"); ax.set_title("Rata-rata GDD per Crop Type")
+                        ax.grid(axis="y", ls="--", alpha=0.4); rf_tab(fig)
+
+                # Radar chart rata-rata parameter iklim
+                st.markdown(f"<div class='sec-hdr'>Radar Chart — Profil Iklim Rata-rata Batch</div>", unsafe_allow_html=True)
+                radar_cols = {
+                    "Suhu":        ("Temperature", 10, 45),
+                    "Kelembapan":  ("Humidity",    0,  100),
+                    "Curah Hujan": ("Rainfall",    0,  350),
+                    "NDVI":        ("NDVI",        -1, 1),
+                    "NPK":         (None,          0,  600),
+                    "GDD":         ("GDD",         0,  3500),
+                    "pH":          ("pH",          4,  10),
+                }
+                cat_r = list(radar_cols.keys())
+                norm_r = []
+                for cat, (col, lo, hi) in radar_cols.items():
+                    if col and col in b_df_valid.columns:
+                        v = b_df_valid[col].mean()
+                    elif cat == "NPK":
+                        npk_cols = [c for c in ["N","P","K"] if c in b_df_valid.columns]
+                        v = sum(b_df_valid[c].mean() for c in npk_cols) if npk_cols else 0
+                        lo, hi = 0, 600
+                    else:
+                        v = 0; lo, hi = 0, 1
+                    norm_r.append(max(min((v - lo) / (hi - lo + 1e-6), 1), 0))
+
+                N_r2 = len(cat_r)
+                angles2 = [n / N_r2 * 2 * np.pi for n in range(N_r2)]
+                vals_r2 = norm_r + [norm_r[0]]
+                angs_r2 = angles2 + [angles2[0]]
+
+                rc1, rc2, rc3 = st.columns([1, 2, 1])
+                with rc2:
+                    fig_r2, ax_r2 = plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True))
+                    fig_r2.patch.set_facecolor(BG)
+                    ax_r2.set_facecolor(CARD)
+                    ax_r2.plot(angs_r2, vals_r2, color=CYAN, lw=2.5, zorder=5)
+                    ax_r2.fill(angs_r2, vals_r2, color=CYAN, alpha=0.2)
+                    for angle, val in zip(angles2, norm_r):
+                        ax_r2.plot([angle, angle], [0, val], color=CYAN, lw=1, alpha=0.4)
+                        ax_r2.scatter([angle], [val], s=50, color=CYAN, zorder=6, edgecolors=BG, lw=1.5)
+                    ax_r2.set_xticks(angles2); ax_r2.set_xticklabels(cat_r, color=T2, fontsize=9)
+                    ax_r2.set_yticks([0.25, 0.5, 0.75, 1.0])
+                    ax_r2.set_yticklabels(["25%","50%","75%","100%"], color=T3, fontsize=7)
+                    ax_r2.grid(color=BORDER, linewidth=0.8); ax_r2.spines["polar"].set_color(BORDER)
+                    ax_r2.set_title("Profil Iklim Rata-rata\n(Ternormalisasi)", color=T2, fontsize=10, pad=18)
+                    rf_tab(fig_r2)
+
+            # ── TAB 5: Tanah & Nutrisi ──────────────────────────────
+            with vt5:
+                bv5c1, bv5c2 = st.columns(2)
+                with bv5c1:
+                    # Bar chart nutrisi makro rata-rata
+                    nut_cols = [c for c in ["N","P","K","Ca","Mg","S"] if c in b_df_valid.columns]
+                    if nut_cols:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        nut_means_b = [b_df_valid[c].mean() for c in nut_cols]
+                        nut_colors  = [CYAN, GREEN, GOLD, ORANGE, PURPLE, RED][:len(nut_cols)]
+                        bars_nb = ax.bar(nut_cols, nut_means_b, color=nut_colors, edgecolor=BG, lw=0.5, width=0.6)
+                        for bar, v in zip(bars_nb, nut_means_b):
+                            ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+1,
+                                    f"{v:.1f}", ha="center", fontsize=8, fontweight="bold", color=T2)
+                        ax.set_title("Rata-rata Nutrisi Makro (mg/kg) — Batch")
+                        ax.set_ylabel("mg/kg"); ax.grid(axis="y", ls="--", alpha=0.4); rf_tab(fig)
+
+                with bv5c2:
+                    # Pie tekstur tanah rata-rata
+                    tex_cols = [c for c in ["Sand","Silt","Clay"] if c in b_df_valid.columns]
+                    if len(tex_cols) == 3:
+                        means_tex = [b_df_valid[c].mean() for c in tex_cols]
+                        labels_tex = [f"{c}\n{v:.1f}%" for c, v in zip(tex_cols, means_tex)]
+                        fig, ax = plt.subplots(figsize=(4.5, 4))
+                        ax.pie(means_tex, labels=labels_tex, autopct="%1.0f%%",
+                               colors=[GOLD, GREEN, CYAN], startangle=90,
+                               wedgeprops={"edgecolor":"white","linewidth":1.5},
+                               textprops={"fontsize":8, "color":T1})
+                        ax.set_title("Rata-rata Komposisi Tekstur Tanah (Batch)"); rf_tab(fig)
+
+                bv5c3, bv5c4 = st.columns(2)
+                with bv5c3:
+                    # Scatter pH vs EC berwarna Yield
+                    if "pH" in b_df_valid.columns and "EC" in b_df_valid.columns:
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        sc_ph = ax.scatter(b_df_valid["pH"], b_df_valid["EC"],
+                                           c=b_df_valid["Yield"], cmap="RdYlGn",
+                                           alpha=0.8, s=40, edgecolors="none", vmin=0, vmax=10)
+                        plt.colorbar(sc_ph, ax=ax, label="Yield").ax.yaxis.label.set_color(T2)
+                        ax.set_xlabel("pH Tanah"); ax.set_ylabel("EC (dS/m)")
+                        ax.set_title("pH vs EC — warna = Yield")
+                        ax.grid(True, alpha=0.3); rf_tab(fig)
+
+                with bv5c4:
+                    # Fitur turunan rata-rata (engineered features) — bar horizontal
+                    eng_feats_b = {}
+                    if all(c in b_df_valid.columns for c in ["N","P","K"]):
+                        eng_feats_b["NPK Sum"]   = (b_df_valid["N"]+b_df_valid["P"]+b_df_valid["K"]).mean()
+                    if all(c in b_df_valid.columns for c in ["N","P"]):
+                        eng_feats_b["N/P ratio"]  = (b_df_valid["N"]/(b_df_valid["P"]+1e-6)).mean()
+                    if all(c in b_df_valid.columns for c in ["P","K"]):
+                        eng_feats_b["P/K ratio"]  = (b_df_valid["P"]/(b_df_valid["K"]+1e-6)).mean()
+                    if all(c in b_df_valid.columns for c in ["Temperature","Rainfall"]):
+                        eng_feats_b["Temp×Rain"]  = (b_df_valid["Temperature"]*b_df_valid["Rainfall"]/1000).mean()
+                    if all(c in b_df_valid.columns for c in ["NDVI","GDD"]):
+                        eng_feats_b["NDVI×GDD"]   = (b_df_valid["NDVI"]*b_df_valid["GDD"]).abs().mean()
+                    if all(c in b_df_valid.columns for c in ["pH","EC"]):
+                        eng_feats_b["pH×EC"]      = (b_df_valid["pH"]*b_df_valid["EC"]).mean()
+                    if all(c in b_df_valid.columns for c in ["Water_Holding_Capacity","Bulk_Density"]):
+                        eng_feats_b["WHC/Bulk"]   = (b_df_valid["Water_Holding_Capacity"]/(b_df_valid["Bulk_Density"]+1e-6)).mean()
+                    if all(c in b_df_valid.columns for c in ["Sand","Clay"]):
+                        eng_feats_b["Sand/Clay"]  = (b_df_valid["Sand"]/(b_df_valid["Clay"]+1e-6)).mean()
+
+                    if eng_feats_b:
+                        eng_max_b  = [600,10,5,15,2500,15,40,10]
+                        fig, ax = plt.subplots(figsize=(5.5, 4))
+                        keys_e = list(eng_feats_b.keys()); vals_e = list(eng_feats_b.values())
+                        max_e  = [600,10,5,15,2500,15,40,10][:len(keys_e)]
+                        norm_e = [min(v/m,1.5) for v,m in zip(vals_e, max_e)]
+                        bar_e  = ax.barh(keys_e, norm_e, color=CYAN, edgecolor=BG, lw=0.5, height=0.55, alpha=0.85)
+                        for bar, val in zip(bar_e, vals_e):
+                            ax.text(bar.get_width()+0.01, bar.get_y()+bar.get_height()/2,
+                                    f"{val:.2f}", va="center", fontsize=8, color=T2)
+                        ax.set_title("Rata-rata Fitur Engineered (Batch)")
+                        ax.set_xlim(0, 1.8); ax.grid(axis="x", ls="--", alpha=0.3); rf_tab(fig)
+
+                # Mikronutrien bar
+                st.markdown(f"<div class='sec-hdr'>Profil Mikronutrien Rata-rata (Batch)</div>", unsafe_allow_html=True)
+                micro_cols = [c for c in ["Zn","Fe","Cu","Mn","B","Mo"] if c in b_df_valid.columns]
+                if micro_cols:
+                    fig, ax = plt.subplots(figsize=(10, 3.5))
+                    micro_means = [b_df_valid[c].mean() for c in micro_cols]
+                    micro_colors = [CYAN, GOLD, GREEN, ORANGE, PURPLE, RED][:len(micro_cols)]
+                    bars_mc = ax.bar(micro_cols, micro_means, color=micro_colors, edgecolor=BG, lw=0.5, width=0.55)
+                    for bar, v in zip(bars_mc, micro_means):
+                        ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.05,
+                                f"{v:.2f}", ha="center", fontsize=9, fontweight="bold", color=T2)
+                    ax.set_title("Rata-rata Mikronutrien (mg/kg) — Batch")
+                    ax.set_ylabel("mg/kg"); ax.grid(axis="y", ls="--", alpha=0.4); rf_tab(fig)
+
+                # Distribusi Bulk Density per Soil Type
+                if "Bulk_Density" in b_df_valid.columns and "Soil_Type" in b_df_valid.columns:
+                    st.markdown(f"<div class='sec-hdr'>Bulk Density & Water Holding Capacity per Soil Type</div>", unsafe_allow_html=True)
+                    bv5s1, bv5s2 = st.columns(2)
+                    with bv5s1:
+                        fig, ax = plt.subplots(figsize=(5.5, 3.5))
+                        soils_b = sorted(b_df_valid["Soil_Type"].unique())
+                        bd_grps = [b_df_valid[b_df_valid["Soil_Type"]==s]["Bulk_Density"].values for s in soils_b]
+                        bp_bd = ax.boxplot(bd_grps, labels=soils_b, patch_artist=True, widths=0.5)
+                        for patch, c_ in zip(bp_bd["boxes"], [CYAN,GOLD,GREEN,PURPLE][:len(soils_b)]):
+                            patch.set_facecolor(c_); patch.set_alpha(0.7)
+                        for med in bp_bd["medians"]: med.set_color(T1); med.set_lw(2)
+                        ax.set_ylabel("Bulk Density (g/cm³)"); ax.set_title("Bulk Density per Soil Type")
+                        ax.grid(True, axis="y", alpha=0.3); rf_tab(fig)
+                    with bv5s2:
+                        if "Water_Holding_Capacity" in b_df_valid.columns:
+                            fig, ax = plt.subplots(figsize=(5.5, 3.5))
+                            whc_grps = [b_df_valid[b_df_valid["Soil_Type"]==s]["Water_Holding_Capacity"].values for s in soils_b]
+                            bp_whc = ax.boxplot(whc_grps, labels=soils_b, patch_artist=True, widths=0.5)
+                            for patch, c_ in zip(bp_whc["boxes"], [CYAN,GOLD,GREEN,PURPLE][:len(soils_b)]):
+                                patch.set_facecolor(c_); patch.set_alpha(0.7)
+                            for med in bp_whc["medians"]: med.set_color(T1); med.set_lw(2)
+                            ax.set_ylabel("WHC (%)"); ax.set_title("Water Holding Capacity per Soil Type")
+                            ax.grid(True, axis="y", alpha=0.3); rf_tab(fig)
+
         else:
             c1_,c2_,c3_,c4_ = st.columns(4)
             c1_.metric("Total Diprediksi",f"{len(preds_v):,}")
@@ -2165,22 +2685,7 @@ elif st.session_state["page"] == "batch":
             ax.hist(preds_v,bins=40,color=CYAN,edgecolor=BG,lw=0.3,alpha=0.85)
             ax.axvline(np.mean(preds_v),color=GOLD,lw=2,ls="--",label=f"Mean={np.mean(preds_v):.4f}")
             ax.set_xlabel("Prediksi Yield (ton/ha)"); ax.set_ylabel("Frekuensi")
-            ax.set_title("Distribusi Hasil Prediksi Batch"); ax.legend(); ax.grid(True,alpha=0.3); rf(fig)
-
-        st.markdown(f"<div class='sec-hdr'>Tabel Hasil Batch (10 Baris Pertama)</div>", unsafe_allow_html=True)
-        show_cols=[c for c in ["Crop_Type","Region","Season","Fertilizer_Type","Pesticide_Usage","Yield"] if c in b_df_valid.columns]
-        show_cols.append("Prediksi_Yield")
-        if has_yield:
-            b_df_valid["Error"]    = (b_df_valid["Yield"]-b_df_valid["Prediksi_Yield"]).round(4)
-            b_df_valid["AbsError"] = b_df_valid["Error"].abs().round(4)
-            show_cols.extend(["Error","AbsError"])
-        st.dataframe(b_df_valid[show_cols].head(10), use_container_width=True, hide_index=True)
-
-        csv_out = b_df_valid.to_csv(index=False).encode("utf-8")
-        dl_col,_ = st.columns([2,4])
-        with dl_col:
-            st.download_button("⬇️  Download Hasil Lengkap (CSV)", csv_out,
-                               "batch_hasil_prediksi.csv","text/csv")
+            ax.set_title("Distribusi Hasil Prediksi Batch"); ax.legend(); ax.grid(True,alpha=0.3); rf_tab(fig)
 
         if errs_inf:
             st.warning(f"⚠️ {len(errs_inf)} baris gagal diproses.")
